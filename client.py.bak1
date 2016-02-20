@@ -1,0 +1,320 @@
+import socket
+import sys
+import time
+import Tkinter as tk
+import tkMessageBox
+import tkFileDialog
+import tkFont
+import matplotlib.pyplot as plt
+import matplotlib, sys
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2TkAgg
+from matplotlib.figure import Figure
+#import matplotlib.pyplot as plt
+import matplotlib.mlab as mlab
+import numpy as np
+
+from Tkconstants import ANCHOR
+matplotlib.use('TkAgg')
+
+'''class child1(tk.Toplevel):
+	def __init__(self,parent,func):
+		self.func = func
+		self.ok_button = tk.Button(parent, command=self.on_ok)
+	def on_ok(self):
+		self.func("button pressed in child1")
+	def show(self):
+'''
+class mainApp(tk.Tk):
+	def __init__(self):
+        	tk.Tk.__init__(self)
+		self.geometry("600x600")
+		self.configure(bg = '#888888')
+		self.resizable(width='false', height='false')
+		self.setupGUI()
+		self.title("Finance App")
+
+		self.connected = False		
+		self.setupSocket()		
+		self.recMSG = ""
+		self.daily_change_clean = False
+		self.risk_by_maturity_clean = False
+		self.histogram_clean = False
+		self.hist_data = []
+	def setupSocket(self):
+		self.HOST = socket.gethostname()
+		print "hostname: ", self.HOST
+		self.PORT = 1234
+		self.MSGSIZE = 8192
+		self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	def doNothing(self):
+		self.throw_warning("warning", "doing nothing")
+		return
+	def connectToServer(self):
+		if self.connected == True:
+			self.throw_warning("warning", "already connected")
+			return		
+		self.s.connect((self.HOST, self.PORT))
+		self.connected = True
+	def disconnectFromServer(self):
+		if self.connected == False:
+			self.throw_warning("warning", "already disconnected")
+			return
+		self.s.close()
+		self.connected = False
+	def throw_warning(self, st1, st2):
+        	tkMessageBox.showwarning(st1, st2)
+	def createMenuBar(self):
+		# CREATE MENU
+		self.mainMenu = tk.Menu(self)
+		self.config(menu=self.mainMenu)
+
+		# FILE SUBMENU
+		self.subMenu_file = tk.Menu(self.mainMenu)
+		self.mainMenu.add_cascade(label="File", menu=self.subMenu_file)
+		self.subMenu_file.add_command(label="Option 1", command=self.run2)
+		self.subMenu_file.add_command(label="Option 2", command=self.run3)
+		self.subMenu_file.add_command(label="Option 3", command=self.doNothing)
+		self.subMenu_file.add_command(label="Option 4", command=self.doNothing)
+		self.subMenu_file.add_separator()
+		self.subMenu_file.add_command(label="Exit", command=exit)
+
+		# Settings
+		self.subMenu_settings = tk.Menu(self.mainMenu)
+		self.mainMenu.add_cascade(label="Settings", menu=self.subMenu_settings)
+		self.subMenu_settings.add_command(label="Connect", command=self.connectToServer)  
+		self.subMenu_settings.add_command(label="Disconnect", command=self.disconnectFromServer)
+
+		# Help
+		self.subMenu_help = tk.Menu(self.mainMenu)
+		self.mainMenu.add_cascade(label="Help", menu=self.subMenu_help)
+		self.subMenu_help.add_command(label="Help", command=self.doNothing)  
+		self.subMenu_help.add_command(label="About", command=self.doNothing)
+	def tbSummary(self):
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		self.s.send('RUN')
+		self.recMSG = self.s.recv(self.MSGSIZE)
+		
+		#Just spill received message on Server Response textbox
+		self.text2_serverOut.insert('end',self.recMSG)
+		#DEBUG
+		for line in self.recMSG:
+			print line
+	def run2(self):
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		self.s.send('RUN2')
+		self.recMSG = self.s.recv(self.MSGSIZE)
+		#Just spill received message on Server Response textbox
+		print self.recMSG
+		self.text2_serverOut.insert('end',str(self.recMSG+'\n'))
+	def run3(self):
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		self.s.send('RUN3')
+		self.recMSG = self.s.recv(self.MSGSIZE)
+		#Just spill received message on Server Response textbox
+		self.text2_serverOut.insert('end',str(self.recMSG+'\n'))
+	def processLines(self):
+		all_lines=[]
+		#from the stream of bytes, form a list(all_lines) of lines ending with marker "EOL" ex: [ [i am good EOL], [so are you EOL]]
+		chstream=""
+		for ch in self.recMSG:
+			if ch != '\n':
+				chstream += ch
+			else:
+				chstream+=" EOL"
+				all_lines.append(chstream)
+				chstream=""
+		line_idx=0
+		all_rows=[]#each row should be a list, so all_row is a list of lists
+		for line in all_lines:
+			row=[]
+			print line
+			words = line.split()
+			for word in words:
+				if word!="EOL":
+					row.append(word)
+			all_rows.append(row)		
+		return all_rows
+	def grab_hist_data(self):
+		for line in self.all_lines:
+			if line[0] == 'GraphData':
+				print "GRAPH STARTS ",len(line)
+				for g_data in line:
+					#print "gdata", g_data
+					if g_data != 'GraphData':
+						self.hist_data.append(float(g_data))
+		print "Grabbed Historgram Data"
+		print self.hist_data
+	def tbSummary2(self):
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		self.s.send('RUN')
+		self.recMSG = self.s.recv(self.MSGSIZE)
+		
+		#Just spill received message on Server Response textbox
+		self.text2_serverOut.insert('end',self.recMSG)
+		
+		self.all_lines=self.processLines()#[ ['a','b','c'], ['d','e','f'] ]
+		self.grab_hist_data()
+		self.text2_serverOut.insert('end',self.all_lines)
+		print "Structured Data:"
+		print self.all_lines
+	def cleanUpBeforeExit(self,op):
+		if op==1 and self.daily_change_clean == True:
+			self.daily_change_clean = False
+			return
+		if op==2 and self.risk_by_maturity_clean == True:
+			self.risk_by_maturity_clean = False
+			return
+		if op==3 and self.histogram_clean == True:
+			self.histogram_clean = False
+			return
+	def spawn_daily_change(self):
+		'''self.cd1 = child1(self,self.func)
+		self.cd1.show()'''
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		if self.daily_change_clean == True:
+			self.throw_warning("warning", "Daily change window is already open")
+			return
+		self.daily_change_clean = True
+		self.s.send('RUN2')
+		self.recMSG = self.s.recv(self.MSGSIZE)
+
+		self.c2 = tk.Toplevel()
+		self.c2.protocol('WM_DELETE_WINDOW',self.cleanUpBeforeExit(1))
+		self.c2.c2frame1 = tk.Frame(self.c2, bg='#DDDDDD', bd=2)
+		self.c2.c2text1 = tk.Text(self.c2.c2frame1, bg='white', bd=1)#, state='disabled')
+		self.c2.c2text1.pack()
+		self.c2.c2frame1.pack(padx=20,pady=20,fill='x')	
+
+		self.c2.c2text1.insert('end',self.recMSG)
+
+	def spawn_risk_by_maturity(self):
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		if self.risk_by_maturity_clean == True:
+			self.throw_warning("warning", "Risk By Maturity window is already open")
+			return
+		self.risk_by_maturity_clean = True
+		self.s.send('RUN3')
+		self.recMSG = self.s.recv(self.MSGSIZE)
+
+		self.c3 = tk.Toplevel()
+		self.c3.protocol('WM_DELETE_WINDOW',self.cleanUpBeforeExit(2))
+		self.c3.c3frame1 = tk.Frame(self.c3, bg='#DDDDDD', bd=2)
+		self.c3.c3text1 = tk.Text(self.c3.c3frame1, bg='white', bd=1)#, state='disabled')
+		self.c3.c3text1.pack()
+		self.c3.c3frame1.pack(padx=20,pady=20,fill='x')	
+
+		self.c3.c3text1.insert('end',self.recMSG)
+	def spawn_histogram(self):
+		if self.connected == False:
+			self.throw_warning("warning", "connect to server first")
+			return 
+		if self.histogram_clean == True:
+			self.throw_warning("warning", "Histogram window is already open")
+			return
+		self.histogram_clean = True
+		#self.s.send('RUN4')
+		#self.recMSG = self.s.recv(self.MSGSIZE)
+		self.tbSummary2()
+		self.c4 = tk.Toplevel()
+		self.c4.title("Histogram")
+		self.c4.protocol('WM_DELETE_WINDOW',self.cleanUpBeforeExit(3))
+		self.c4.c4frame1 = tk.Frame(self.c4, bg='#DDDDDD', bd=2)
+		#self.c4.c4text1 = tk.Text(self.c4.c4frame1, bg='white', bd=1)#, state='disabled')
+		#self.c4.c4text1.pack()
+		self.c4.c4frame1.pack(padx=20,pady=20,fill='x')	
+
+		hisdata = []
+		for h in self.hist_data:
+			hisdata.append(int(h))
+		f = Figure()
+		canvas = FigureCanvasTkAgg(f, master=self.c4.c4frame1)
+		canvas.get_tk_widget().pack()
+
+		p = f.gca()
+		p.hist(hisdata, bins = range(min(hisdata), max(hisdata)+10, 10))
+		canvas.show()
+		#self.c4.c4text1.insert('end',hisdata)
+
+	def setupLayout(self):
+		###########################  Frame 1  ######################################
+		self.frame1 = tk.Frame(self, bg='#DDDDDD', bd=2)
+
+		self.button1_tbSummary = tk.Button(self.frame1, text = "Trading Book Summary", command = self.tbSummary2, bg='#DDFFDD', relief='raised')
+		self.button1_tbSummary['font'] = self.helv10
+		self.button1_tbSummary.pack(side='left',padx=5,pady=20)
+
+		self.frame1.pack(padx=20,pady=20,fill='x')
+		############ BUTTON - FRAME 1 FOR 1ST GUI SCREEN - SUMMARY ##################
+		self.button1_daily_change = tk.Button(self.frame1, text = "DAILY CHANGE BY ISSUER", command = self.spawn_daily_change, bg='#923456', relief='raised')
+		self.button1_daily_change['font'] = self.helv10
+		self.button1_daily_change.pack(side='left',padx=5,pady=20)
+		############ BUTTON - FRAME 1 FOR 2ND GUI SCREEN - RISK BY MATURITY : CLIENT SENDS "RUN2", CLIENT HANDLER: spawn_risk_by_maturity ##################
+		self.button1_risk_by_maturity = tk.Button(self.frame1, text = "RISK BY MATURITY", command = self.spawn_risk_by_maturity, bg='#123956', relief='raised')
+		self.button1_risk_by_maturity['font'] = self.helv10
+		self.button1_risk_by_maturity.pack(side='left',padx=5,pady=20)
+		
+
+		###########################		Frame 2		#################################
+		self.frame2 = tk.Frame(self, bg='#DDDDDD', bd=2)
+		############ BUTTON - FRAME 1 FOR 3RD GUI SCREEN - HISTOGRAM : CLIENT SENDS "RUN3", CLIENT HANDLER: spawn_histogram ##################
+		self.button2_histogram = tk.Button(self.frame2, text = "HISTOGRAM", command = self.spawn_histogram, fg='white', bg='#123956', relief='raised')
+		self.button2_histogram['font'] = self.helv10
+		self.button2_histogram.pack(padx=5,pady=20)
+
+		self.text2_serverOut = tk.Text(self.frame2, bg='white', bd=1)#, state='disabled')
+		self.text2_serverOut.pack()
+		self.frame2.pack(padx=20,pady=20,fill='x')
+		
+		
+		### Status Area ###
+        	self.status = tk.Label(self, text="All modules loaded...", bd=1, relief='sunken', anchor='w')
+        	self.status.pack(fill='x', side='bottom')
+	def setupGUI(self):
+		#SOME FONTS
+		self.helv15 = tkFont.Font(family='Helvetica', size=15, weight='bold')
+        	self.helv10 = tkFont.Font(family='Helvetica', size=10, weight='bold')
+
+		
+		#Create Menubar & Main Layout
+		self.createMenuBar()
+		self.setupLayout()
+		
+		
+def main():
+	app1 = mainApp()
+	app1.mainloop()
+main()
+
+'''
+HOST = 'MacBook-Pro.local'
+PORT = 1234
+MSGSIZE = 8192
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((HOST, PORT))
+
+connected = True
+
+while connected == True:
+	msg=''
+	msg = raw_input("input msg 'EXIT' to disconnect, 'RUN' to run calculations: ")
+	s.send(msg)
+	data = s.recv(MSGSIZE)
+	print 'Received from server: \n', data
+	if(msg == 'EXIT'):
+		connected = False
+		s.close()
+'''

@@ -1,0 +1,799 @@
+#include "SBB_date.cc"
+#include "SBB_io.cc"
+#include "calculation.cc"
+#include "SBB_util.cc"
+#include "SBB_ratings.cc"
+#include "sbb_socket.h"
+#include <iostream>
+#include <string>
+#include <math.h>
+#include <cmath>
+#include <vector>
+#include <sstream>
+#include <stdlib.h>
+using namespace std;
+using namespace std;
+
+/* file handler - opens trading book and creates results files */
+//===================================================================================================
+void handleFiles(SBB_instrument_fields* &data_opening, SBB_instrument_fields* &data_closing, SBB_instrument_fields* &yieldCurve, 
+	SBB_output_file* &book_result, SBB_output_file* &result, int &collectionSizeTBOpening, int &collectionSizeTBClosing, int &collectionSizeYC, 
+	string bookfile_opening, string bookfile_closing, string curvefile){
+
+
+//	SBB_instrument_input_file* dataFile_mt = new SBB_instrument_input_file((char*)bookfile_midtermbook.c_str());
+	SBB_instrument_input_file* dataFile_op = new SBB_instrument_input_file((char*)bookfile_opening.c_str());
+	SBB_instrument_input_file* dataFile_cl = new SBB_instrument_input_file((char*)bookfile_closing.c_str());
+
+	SBB_yield_curve_input_file* yieldFile = new SBB_yield_curve_input_file((char*)curvefile.c_str());
+
+	//sets length of the collections
+//	collectionSizeTBMidterm = get_row_count_minus_comments((char*)bookfile_midtermbook.c_str());
+	collectionSizeTBOpening = get_row_count_minus_comments((char*)bookfile_opening.c_str());
+	collectionSizeTBClosing = get_row_count_minus_comments((char*)bookfile_closing.c_str());
+
+	//reading data
+//	data_midterm = (dataFile_mt->records(collectionSizeTBMidterm));
+	data_opening = (dataFile_op->records(collectionSizeTBOpening));
+	data_closing = (dataFile_cl-> records(collectionSizeTBClosing));
+	
+	collectionSizeYC = get_row_count_minus_comments((char*)curvefile.c_str());
+	yieldCurve = (yieldFile->curve_records(collectionSizeYC));
+
+	//handling output files
+	book_result = new SBB_output_file("book_results.txt");
+	result = new SBB_output_file("results.txt");
+
+}
+//===================================================================================================
+
+/* Calculations: */
+//===================== Calculates the dv01 of a specific treasury =====================
+double calc_T_dv01(SBB_instrument_fields* yieldCurve, int curveSize, char* treasuryYr){
+	double price;
+	double dv01;
+	SBB_date from;
+	SBB_date to;
+	int numPayments = 0;
+	for(int i = 0; i < curveSize; i ++){
+		if(!strcmp(yieldCurve[i].SecurityID(), treasuryYr)){
+			from.set_from_yyyymmdd(yieldCurve[i].SettlementDate());
+			to.set_from_yyyymmdd(yieldCurve[i].MaturityDate());
+			numPayments = get_number_of_periods_semiannual(from, to);
+			//printf("found  is %s \n", yieldCurve[i].SecurityID());
+			Calculator* calculator_ptr = new Coupon_Bearing_Calculator(yieldCurve[i].Yield(), yieldCurve[i].Coupon(), numPayments, 1000);
+			price = calculator_ptr->calculate();
+			dv01 = calculator_ptr->sensitivity_calculate(price);
+			//printf("dv01 is %.6f \n", dv01);			
+		}
+	}	
+		return dv01;
+}
+
+//===================== Gets yield rate according to remaining term (SPREAD) ===============
+double get_BenchMark(int period, SBB_instrument_fields* yieldCurve, int curveSize){
+	double yieldTmp = 0.0;
+	int yrs = 100;
+	int index = 0;
+	int bMark = 0;
+	int currentBMark = 0;
+	for (int i = 0; i < curveSize; i++){
+		if(!strcmp(yieldCurve[i].SecurityID(),"T2")){
+			bMark=2;
+		}
+		else if(!strcmp(yieldCurve[i].SecurityID(),"T5")){
+			bMark=5;
+		}
+		else if(!strcmp(yieldCurve[i].SecurityID(),"T10")){
+			bMark=10;
+		}
+		else{
+			bMark=30;
+		}
+		if(std::abs(bMark-period) < yrs){
+			
+			yrs = std::abs(bMark-period);
+			index = i;
+			currentBMark = bMark;
+			
+		}
+		else if(abs(bMark-period) == yrs){
+			if(bMark < currentBMark){
+				yrs = std::abs(bMark-period);
+				index = i;
+				currentBMark = bMark;
+			}
+		}
+	}
+	//yieldCurve[index].show();
+	//std:: cout << bMark << "    " << yieldCurve[index].Yield() << std::endl; 
+	yieldTmp = yieldCurve[index].Yield();
+	return yieldTmp;
+}
+
+//===================== Putting bonds into buckets =====================
+void bucketize(vector<vector<SBB_instrument_fields> > &v, SBB_instrument_fields* data, int collectionSizeTB){
+	SBB_date from,to;
+	for (int i=0;i<collectionSizeTB; ++i){
+		from.set_from_yyyymmdd(data[i].SettlementDate());
+		to.set_from_yyyymmdd(data[i].MaturityDate());
+		int x=get_number_of_periods_semiannual(from,to)/2;
+		//cout<<"data["<<i<<"]: "<<" "<<x<<endl;
+		if(x<=2)
+			v[0].push_back(data[i]);
+		else if(x>2 && x<=5)
+			v[1].push_back(data[i]);
+		else if(x>5 && x<=10)
+			v[2].push_back(data[i]);
+		else
+			v[3].push_back(data[i]);
+	}
+}
+
+/*
+//===================== printing bucket (for debug) =====================
+
+void printbuckets(vector<vector<SBB_instrument_fields> > v){
+	for(int i=0;i<v.size();++i){
+		cout<<"BUCKET["<<i<<"]:"<<endl;
+		for(int j=0;j<v[i].size();++j)
+			v[i][j].show();
+	}
+}
+*/
+
+//================ Quick sort code taken from: http://codereview.stackexchange.com/questions/77782/quick-sort-implementation ======================
+//For sorting the PnL vector
+int partition(double *arr, const int left, const int right) {
+    const int mid = left + (right - left) / 2;
+    const int pivot = arr[mid];
+    // move the mid point value to the front.
+    std::swap(arr[mid],arr[left]);
+    int i = left + 1;
+    int j = right;
+    while (i <= j) {
+        while(i <= j && arr[i] <= pivot) {
+            i++;
+        }
+
+        while(i <= j && arr[j] > pivot) {
+            j--;
+        }
+
+        if (i < j) {
+            std::swap(arr[i], arr[j]);
+        }
+    }
+    std::swap(arr[i - 1],arr[left]);
+    return i - 1;
+}
+
+void quicksort(double *arr, const int left, const int right, const int sz){
+
+    if (left >= right) {
+        return;
+    }
+
+
+    int part = partition(arr, left, right);
+
+    
+
+    quicksort(arr, left, part - 1, sz);
+    quicksort(arr, part + 1, right, sz);
+}
+//============================================================================
+
+//============================== Hedge bucket ================================
+
+void hedge(SBB_instrument_fields data, SBB_instrument_fields* yieldCurve, int curveSize, double &bucketRisk, double &bucketdv01){
+		SBB_date from, to;
+		int numPayments = 0;
+		double price;
+		double dv01;
+		double risk;
+		
+		//calculate time
+		from.set_from_yyyymmdd(data.SettlementDate());
+		to.set_from_yyyymmdd(data.MaturityDate());
+		numPayments = get_number_of_periods_semiannual(from, to);
+		
+		//char* something = new char[SBB_LINE_BUFFER_LENGTH];
+		Calculator* calculator_ptr;
+		//Calculator* calculator_ptr_T2;
+		//YIELD CALCULATION
+		if(data.is_yield_priced()){
+			if(data.Coupon() == 0.0){
+				calculator_ptr = new Zero_Coupon_Calculator(data.Yield(), data.Amount(), numPayments);
+				//printf("Sensitivity: %.3f \n", calculator_ptr->sensitivity_calculate());
+			}
+			else{
+				calculator_ptr = new Coupon_Bearing_Calculator(data.Yield(), data.Coupon(), numPayments, data.Amount());
+				//printf("Amount: %d\tRisk: %.3f \n", data.Amount(),calculator_ptr->calculate_risk());
+			}
+			price = calculator_ptr->calculate();
+			dv01 = calculator_ptr->sensitivity_calculate(price);
+			risk = calculator_ptr->calculate_risk(dv01);
+		}
+		//SPREAD CALCULATION
+		else{
+			double ytmp = get_BenchMark(numPayments/2, yieldCurve, curveSize);
+			
+			calculator_ptr = new Spread_Calculator(ytmp+(data.Spread()/100), data.Coupon(), numPayments, data.Amount());
+			//std::cout << "yield "<< ytmp+(data.Spread()/100) << "# "<< numPayments << std::endl;
+			price = calculator_ptr->calculate();
+			dv01 = calculator_ptr->sensitivity_calculate(price);
+			risk = calculator_ptr->calculate_risk(dv01); //Since US ticker
+			
+			//std::cout << "bmark "<< tmp.period<< std::endl;
+		}
+		
+		bucketRisk += risk;
+		// double ytmp = get_BenchMark(2, yieldCurve, curveSize);
+		// calculator_ptr_T2 = new Spread_Calculator(ytmp, data.Coupon(), numPayments, data.Amount());
+		// price = calculator_ptr->calculate();
+		// dv01 = calculator_ptr->sensitivity_calculate(price);
+		bucketdv01 += dv01;
+}
+
+//=============================================================================
+
+
+
+//****************************************************************************************************************
+//************************************************* FIXED YIELD **************************************************
+//===================== Calculate Price & write price, dv01, risk, LGD to book result file =====================
+void calculate_price_dv01_risk_LGD_to_file(SBB_instrument_fields data, SBB_instrument_fields* yieldCurve, 
+	int curveSize, SBB_bond_ratings rat, SBB_output_file* file, double &price, double &dv01, double &risk, double &LGD, double &marketvalue){
+	SBB_date from;
+	SBB_date to;
+	int numPayments;
+
+	// double price;
+	// double dv01;
+	// double risk;
+
+	//calculate number of payments
+	from.set_from_yyyymmdd(data.SettlementDate());
+	to.set_from_yyyymmdd(data.MaturityDate());
+	numPayments = get_number_of_periods_semiannual(from, to);
+
+	char* line_to_write = new char[SBB_LINE_BUFFER_LENGTH];
+	Calculator* calculator_ptr;
+
+	if(data.is_yield_priced()){
+		//YIELD CALCULATION
+		if(data.Coupon() == 0.0){
+			calculator_ptr = new Zero_Coupon_Calculator(data.Yield(), data.Amount(), numPayments);
+		}
+		else{
+			calculator_ptr = new Coupon_Bearing_Calculator(data.Yield(), data.Coupon(), numPayments, data.Amount());
+		}
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+		//SPREAD CALCULATION
+	else{
+		double ytmp = get_BenchMark(numPayments/2, yieldCurve, curveSize);
+		
+		calculator_ptr = new Spread_Calculator(ytmp+(data.Spread()/100), data.Coupon(), numPayments, data.Amount());
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+	marketvalue = (price/100)*data.Amount();
+	LGD=rat.LGD_given_SnP_Fitch(data.Quality());
+	LGD = LGD * data.Amount()/100;
+	if(LGD == -0) LGD =0;
+
+	// totalRisk+=risk;
+	// total_marketvalue+=marketvalue;
+
+	sprintf(line_to_write, "%s %.2f %.3f %.3f %.3f\n", data.Line_buffer(), price, dv01, risk, LGD);
+	file->write_line(line_to_write);
+}
+
+
+//===================== Calculate price, dv01, risk, and LGD ** NOT ** write to file =====================
+
+void calculate_price_dv01_risk_LGD(SBB_instrument_fields data, SBB_instrument_fields* yieldCurve, 
+	int curveSize, SBB_bond_ratings rat, double &price, double &dv01, double &risk, double &LGD, double &marketvalue){
+	SBB_date from;
+	SBB_date to;
+	int numPayments;
+
+	//calculate number of payments
+	from.set_from_yyyymmdd(data.SettlementDate());
+	to.set_from_yyyymmdd(data.MaturityDate());
+	numPayments = get_number_of_periods_semiannual(from, to);
+
+	Calculator* calculator_ptr;
+
+	if(data.is_yield_priced()){
+		//YIELD CALCULATION
+		if(data.Coupon() == 0.0){
+			calculator_ptr = new Zero_Coupon_Calculator(data.Yield(), data.Amount(), numPayments);
+		}
+		else{
+			calculator_ptr = new Coupon_Bearing_Calculator(data.Yield(), data.Coupon(), numPayments, data.Amount());
+		}
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+		//SPREAD CALCULATION
+	else{
+		double ytmp = get_BenchMark(numPayments/2, yieldCurve, curveSize);
+		
+		calculator_ptr = new Spread_Calculator(ytmp+(data.Spread()/100), data.Coupon(), numPayments, data.Amount());
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+	marketvalue = (price/100)*data.Amount();
+	LGD=rat.LGD_given_SnP_Fitch(data.Quality());
+	LGD = LGD * data.Amount()/100;
+	if(LGD == -0) LGD =0;
+
+}
+//****************************************************************************************************************
+//****************************************************************************************************************
+
+
+
+//****************************************************************************************************************
+//******************************************* BasePoint change enabled *******************************************
+//===================== Calculate Price & write price, dv01, risk, LGD to book result file =====================
+void calculate_price_dv01_risk_LGD_to_file_changerate(SBB_instrument_fields data, SBB_instrument_fields* yieldCurve, 
+	int curveSize, SBB_bond_ratings rat, SBB_output_file* file, double &price, double &dv01, double &risk, double &LGD, 
+	double &marketvalue, double bpchange){
+	SBB_date from;
+	SBB_date to;
+	int numPayments;
+
+	// double price;
+	// double dv01;
+	// double risk;
+
+	//calculate number of payments
+	from.set_from_yyyymmdd(data.SettlementDate());
+	to.set_from_yyyymmdd(data.MaturityDate());
+	numPayments = get_number_of_periods_semiannual(from, to);
+
+	char* line_to_write = new char[SBB_LINE_BUFFER_LENGTH];
+	Calculator* calculator_ptr;
+
+	if(data.is_yield_priced()){
+		//YIELD CALCULATION
+		if(data.Coupon() == 0.0){
+			calculator_ptr = new Zero_Coupon_Calculator((data.Yield()+(bpchange/100)), data.Amount(), numPayments);
+		}
+		else{
+			calculator_ptr = new Coupon_Bearing_Calculator((data.Yield()+(bpchange/100)), data.Coupon(), numPayments, data.Amount());
+		}
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+		//SPREAD CALCULATION
+	else{
+		double ytmp = get_BenchMark(numPayments/2, yieldCurve, curveSize);
+		
+		calculator_ptr = new Spread_Calculator(ytmp+(data.Spread()/100)+(bpchange/100), data.Coupon(), numPayments, data.Amount());
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+	marketvalue = (price/100)*data.Amount();
+	LGD=rat.LGD_given_SnP_Fitch(data.Quality());
+	LGD = LGD * data.Amount()/100;
+	if(LGD == -0) LGD =0;
+
+	// totalRisk+=risk;
+	// total_marketvalue+=marketvalue;
+
+	sprintf(line_to_write, "%s %.2f %.3f %.3f %.3f\n", data.Line_buffer(), price, dv01, risk, LGD);
+	file->write_line(line_to_write);
+}
+
+
+//===================== Calculate price, dv01, risk, and LGD NOT write to file =====================
+
+void calculate_price_dv01_risk_LGD_chagerate(SBB_instrument_fields data, SBB_instrument_fields* yieldCurve, 
+	int curveSize, SBB_bond_ratings rat, double &price, double &dv01, double &risk, double &LGD, 
+	double &marketvalue, double bpchange){
+	SBB_date from;
+	SBB_date to;
+	int numPayments;
+
+	//calculate number of payments
+	from.set_from_yyyymmdd(data.SettlementDate());
+	to.set_from_yyyymmdd(data.MaturityDate());
+	numPayments = get_number_of_periods_semiannual(from, to);
+
+
+	Calculator* calculator_ptr;
+
+	if(data.is_yield_priced()){
+		//YIELD CALCULATION
+		if(data.Coupon() == 0.0){
+			calculator_ptr = new Zero_Coupon_Calculator((data.Yield()+(bpchange/100)), data.Amount(), numPayments);
+		}
+		else{
+			calculator_ptr = new Coupon_Bearing_Calculator((data.Yield()+(bpchange/100)), data.Coupon(), numPayments, data.Amount());
+		}
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+		//SPREAD CALCULATION
+	else{
+		double ytmp = get_BenchMark(numPayments/2, yieldCurve, curveSize);
+		
+		calculator_ptr = new Spread_Calculator((ytmp+(data.Spread()/100)+(bpchange/100)), data.Coupon(), numPayments, data.Amount());
+		price = calculator_ptr->calculate();
+		dv01 = calculator_ptr->sensitivity_calculate(price);
+		risk = calculator_ptr->calculate_risk(dv01);
+	}
+	marketvalue = (price/100)*data.Amount();
+	LGD=rat.LGD_given_SnP_Fitch(data.Quality());
+	LGD = LGD * data.Amount()/100;
+	if(LGD == -0) LGD =0;
+
+}
+
+
+void calculate_spread_var(SBB_instrument_fields data, SBB_instrument_fields* yieldCurve, 
+	int curveSize, SBB_bond_ratings rat, double &price, double &dv01, double &risk, double &LGD, 
+	double &marketvalue, double yieldchange, double bpchange){
+	SBB_date from;
+	SBB_date to;
+	int numPayments;
+
+	//calculate number of payments
+	from.set_from_yyyymmdd(data.SettlementDate());
+	to.set_from_yyyymmdd(data.MaturityDate());
+	numPayments = get_number_of_periods_semiannual(from, to);
+
+
+	Calculator* calculator_ptr;
+
+
+	double ytmp = get_BenchMark(numPayments/2, yieldCurve, curveSize);
+		
+	calculator_ptr = new Spread_Calculator((ytmp+yieldchange+(bpchange/100)), data.Coupon(), numPayments, data.Amount());
+	price = calculator_ptr->calculate();
+	dv01 = calculator_ptr->sensitivity_calculate(price);
+	risk = calculator_ptr->calculate_risk(dv01);
+
+	marketvalue = (price/100)*data.Amount();
+	LGD=rat.LGD_given_SnP_Fitch(data.Quality());
+	LGD = LGD * data.Amount()/100;
+	if(LGD == -0) LGD =0;
+
+}
+
+
+
+
+//****************************************************************************************************************
+//****************************************************************************************************************
+
+void runcode(char (&message)[MSGSIZE], char (&recd_msg)[MSGSIZE]){
+	//DEBUG
+	cout<<"Received message: "<<recd_msg<<endl;
+	/*if(strcmp(recd_msg, "RUN2")==0){
+		cout<<"RUN2 received"<<endl;
+		string res="RUN2 bla bla";
+		const char *res2=(const char*)res.c_str();
+		//strcpy(res,res2);
+		sprintf(message,res2);
+		return;
+	}
+	if(strcmp(recd_msg, "RUN3")==0){
+		cout<<"RUN3 received"<<endl;
+		
+		string res="RUN3 bla bla";
+		
+		const char *res2=(const char*)res.c_str();
+		//strcpy(res,res2);
+		sprintf(message,res2);
+		return;
+	}*/
+	/*
+	if(strcmp(recd_msg, "RUN4")==0){
+		vector<int> nums;
+		for(int i=0;i<100;++i){
+			int num=rand()%100;
+			nums.push_back(num);
+		}
+		stringstream ss;
+		for(int i=0;i<nums.size();++i){
+			ss<<nums[i]<<" ";
+		}
+		string res = ss.str();
+		const char *res2=(const char*)res.c_str();
+		//strcpy(res,res2);
+		sprintf(message,res2);
+		return;
+	}*/
+	cout<<"Should Not Print"<<endl;
+
+	//files:
+	SBB_bond_ratings ratings;
+	SBB_output_file* result;
+	SBB_output_file* book_result;
+
+	int collectionSizeTB_opening;
+	int collectionSizeTB_closing;
+	int collectionSizeYC;
+
+	string book_opening = "tradingbook_opening.txt";
+	string book_closing = "tradingbook_closing.txt";
+	string curvefile = "midterm_curve.txt";
+
+	SBB_instrument_fields* data_opening;
+	SBB_instrument_fields* data_closing;
+	SBB_instrument_fields* yieldCurve;
+
+	//variables 
+	vector<vector<SBB_instrument_fields> > buckets(4); //index: 0:(0,2],1:(2,5],2:(5,10],3:(10,30]
+
+	//============== files now handled all together ========
+	handleFiles(data_opening, data_closing, yieldCurve, book_result, result, collectionSizeTB_opening, collectionSizeTB_closing, collectionSizeYC,
+		book_opening, book_closing, curvefile);
+
+
+	//********************************************************************************
+	//======== using opening book ===========
+	//********************************************************************************
+	bucketize(buckets, data_opening, collectionSizeTB_opening);
+
+	//for general purpose
+	double price=0;
+	double dv01=0;
+	double risk=0;
+
+	double LGD=0;
+	double marketvalue=0;
+
+	vector<int> AmtBefore;
+	vector<int> AmtAfter;
+	int totalPositionChange = 0;
+
+	
+	//for result.txt
+	int largestLong=0;
+	int largestShort=0;
+	double mostRisk=0;
+	double totalRisk=0;
+	
+	//for calculating market value change
+	double total_marketValue=0;
+	double total_marketValue_after_change=0;
+	double marketValueChange=0;
+
+	//for LGD change
+	vector<double> LGD_before_change;
+	vector<double> LGD_after_change;
+	double LGD_Change=0;
+
+
+	for(int i = 0; i < collectionSizeTB_opening; i ++){
+		calculate_price_dv01_risk_LGD_to_file(data_opening[i], yieldCurve, collectionSizeYC, ratings, book_result, price, dv01, risk, LGD, marketvalue);
+		LGD_before_change.push_back(LGD);
+		if(data_opening[i].Amount() > largestLong) largestLong = data_opening[i].Amount();
+		if(data_opening[i].Amount() < largestShort) largestShort = data_opening[i].Amount();
+		if(abs(risk) > abs(mostRisk)) mostRisk = risk;
+		totalRisk+=risk;
+		AmtBefore.push_back(data_opening[i].Amount());
+		total_marketValue += marketvalue;
+
+		//calculating bp100 change on opening to get total market value change
+		calculate_price_dv01_risk_LGD_chagerate(data_opening[i], yieldCurve, collectionSizeYC, ratings, price, dv01, risk, LGD, marketvalue, 100);
+		total_marketValue_after_change += marketvalue;
+	}
+	char* s = new char[SBB_LINE_BUFFER_LENGTH];
+	sprintf(s, "%d \n%d \n%.3f \n%.3f", largestLong, largestShort, mostRisk, totalRisk);
+	result->write_line(s);
+
+	//marketValueChange = abs(total_marketValue_after_change - total_marketValue);
+
+	//for hedge calculation
+	int bucketNumToHedge = 3;
+	char* TYear = new char[3];
+	double totalBucketDv01 = 0;
+	double totalBucketRisk = 0;
+	double totalBucketAmt= 0;
+	double t2dv01 = 0;
+	sprintf(TYear, "T2");
+	// double hedgeAmount = hedge(buckets, bucketNumToHedge, TYear, yieldCurve, collectionSizeYC);
+
+	t2dv01 = calc_T_dv01(yieldCurve, collectionSizeYC, TYear);
+	for (int i = 0; i < buckets[bucketNumToHedge].size(); i++){
+		hedge(buckets[bucketNumToHedge][i], yieldCurve, collectionSizeYC, totalBucketRisk, totalBucketDv01);
+		totalBucketAmt += buckets[bucketNumToHedge][i].Amount();
+	}
+
+	double amount = 0-(totalBucketDv01*totalBucketAmt/100/t2dv01);
+	//sprintf(message, "Amount of 2 year treasury to hedge the 30 yr bucket: %.3f \nMarket Value: %.3f \nShifted Market Value: %.3f\n", amount, total_marketValue, total_marketValue_after_change);
+	//********************************************************************************
+	//======== using closing book ===========
+	//********************************************************************************
+	//for VaR
+	SBB_var_input_file daily;
+	SBB_var_input_file spread;
+	SBB_var_day_record* var_fields;
+	SBB_var_day_record* t_fields;
+
+	int pnl_length;
+	//regular price (before change)
+	double temp_price=0;
+	double temp_dv01=0;
+	double temp_risk=0;
+	double temp_LGD=0;
+	double temp_marketvalue=0;
+	//VaR price (after change)
+	double var_price=0;
+	double var_dv01=0;
+	double var_risk=0;
+	double var_LGD=0;
+	double var_marketvalue=0;
+	double var_bpchange=0;
+	double var_yieldchange=0;
+
+	//separate pnl vector for spread and yield
+	//all together is pnlVectorTotal
+	vector< vector<double> > pnlVectorTotal;
+	vector< vector<double> > pnlVectorYield;
+	vector< vector<double> > pnlVectorSpread;
+
+	//Everything now keeped in one single for loop through the book to avoid repetition
+	for(int i = 0; i < collectionSizeTB_closing; i++){
+		AmtAfter.push_back(data_closing[i].Amount());
+		totalPositionChange += AmtAfter[i]-AmtBefore[i];
+		//printf("bond: %s\n", data_closing[i].SecurityID());
+		calculate_price_dv01_risk_LGD(data_closing[i], yieldCurve, collectionSizeYC, ratings, temp_price, temp_dv01, temp_risk, temp_LGD, temp_marketvalue);
+		LGD_after_change.push_back(temp_LGD);
+		LGD_Change+=LGD_after_change[i]-LGD_before_change[i];
+		//printf("old price %.2f\n", temp_price);
+
+		char* s = new char[SBB_LINE_BUFFER_LENGTH];
+		sprintf(s, "var/%s.txt", data_closing[i].SecurityID());
+		daily.open(s);
+		var_fields = daily.records(pnl_length);
+		vector<double> pnl_bond; 
+
+		//yield priced var
+		if(data_closing[i].is_yield_priced()){
+			for(int j = 1; j < pnl_length; j++){
+				var_bpchange = ((var_fields[j].ValValue())-var_fields[j-1].ValValue())*100; //calculate the bpchange and then use it to calc new price
+				calculate_price_dv01_risk_LGD_chagerate(data_closing[i], yieldCurve, collectionSizeYC, ratings, var_price, var_dv01, var_risk, var_LGD, 
+				var_marketvalue, var_bpchange);
+				pnl_bond.push_back((var_price - temp_price)/100*data_closing[i].Amount());
+				// printf("new price%.6f\n", var_price);
+				// printf("%.3f\n", var_bpchange);
+				// printf("pricechange: %6f \n\n",(var_price - temp_price)/100*data_closing[i].Amount() );
+			}
+			pnlVectorYield.push_back(pnl_bond);
+
+		}
+		//spread priced var
+		else{
+			char* sp = new char[SBB_LINE_BUFFER_LENGTH];
+			//sprintf(sp, "var/%s.txt", var_fields[0].BenchmarkID());//doesn't work!!
+			sprintf(sp, "var/%s.txt", "T2");
+			spread.open(sp);
+			t_fields = spread.records(pnl_length);
+
+			for(int j = 1; j < pnl_length; j++){
+				var_yieldchange = ((t_fields[j].ValValue())-(t_fields[j-1].ValValue())); //taken from T2: add to yield rate
+				//printf("%.2f \n",var_yieldchange );
+				var_bpchange = ((var_fields[j].ValValue())-var_fields[j-1].ValValue()); //taken from spread hist file: add to spread bpchange
+				//printf("%.2f \n",var_bpchange );
+				//double finalbp = var_bpchange + var_yieldchange;
+				calculate_spread_var(data_closing[i], yieldCurve, collectionSizeYC, ratings, var_price, var_dv01, var_risk, var_LGD, 
+				var_marketvalue,var_yieldchange, var_bpchange+data_closing[i].Spread());
+				// calculate_price_dv01_risk_LGD_chagerate(data_closing[i], yieldCurve, collectionSizeYC, ratings, var_price, var_dv01, var_risk, var_LGD, 
+				// var_marketvalue, var_bpchange);
+				pnl_bond.push_back((var_price - temp_price)/100*data_closing[i].Amount());
+				// printf("new price%.6f\n", var_price);
+				// //printf("%.3f\n", finalbp);
+				// printf("pricechange: %6f \n\n",(var_price - temp_price)/100*data_closing[i].Amount() );
+			}
+			pnlVectorSpread.push_back(pnl_bond);
+		}
+	
+		pnlVectorTotal.push_back(pnl_bond);
+	
+	}
+	//final results pnl vector 
+	double bookpnl[pnl_length];
+	double yieldpnl[pnl_length];
+	double spreadpnl[pnl_length];
+
+	//add the total values for pnl
+	for(int i = 0; i < pnl_length; i ++){
+		double temp1 = 0.0;
+		double temp2 = 0.0;
+		double temp3 = 0.0;
+
+		for(int j = 0; j < collectionSizeTB_closing; j++){
+			temp1 += pnlVectorTotal[j][i];
+		}
+		bookpnl[i] = temp1;
+
+		for(int j = 0; j < pnlVectorYield.size(); j++){
+			temp2 += pnlVectorYield[j][i];
+		}
+		yieldpnl[i]=temp2;
+
+		for(int j = 0; j < pnlVectorSpread.size(); j++){
+			temp3 += pnlVectorSpread[j][i];
+		}
+		spreadpnl[i]=temp3;
+	}
+
+	//sort the pnl vectors
+	quicksort(bookpnl, 0, pnl_length-1, pnl_length);
+	quicksort(yieldpnl, 0, pnl_length-1, pnl_length);
+	quicksort(spreadpnl, 0, pnl_length-1, pnl_length);
+
+	//calculating index
+	double conf_interval = 99;
+	int pnlIndex = (pnl_length - (conf_interval/100) * pnl_length);
+	double pnl_var= bookpnl[pnlIndex-1] / 1000;
+	double yield_var = yieldpnl[pnlIndex-1] /1000;
+	double spread_var = spreadpnl[pnlIndex-1];
+
+	//print out result for 99th interval of all
+	printf("the %.1f th confidence interval of pnl of the book is: %.1f in M\n", conf_interval, pnl_var);
+	printf("the %.1f th confidence interval of pnl yield is: %.1f in M\n", conf_interval, yield_var);
+	printf("the %.1f th confidence interval of pnl spread is: %.1f in K\n", conf_interval, spread_var);
+	
+	
+	// for (int i = 0; i < pnl_length; i++){
+	// 	//totalpnl += bookpnl[i];
+	// 	printf("%d: %.1f \n",i, spreadpnl[i]);
+	// }
+	sprintf(message,"Total Position change: %d\nTotal LGD Change : %f",totalPositionChange, LGD_Change);
+
+	// ##################### WORK STARTED BY ABHISHEK ###########################
+	// ##################### RETURN NEW MESSAGE TO GUI ###########################
+	stringstream ss;
+	ss<<"the "<<conf_interval<<"th confidence interval of pnl of the book is: "<<pnl_var<<" in M\n";
+	ss<<"the "<<conf_interval<<"th confidence interval of pnl yield is: "<<yield_var<<" in M\n";
+	ss<<"the "<<conf_interval<<"th confidence interval of pnl spread is: "<<spread_var<<" in K\n";
+	ss<<"GraphData ";
+
+	vector<int> nums;
+	for(int i=0;i<100;++i){
+		int num = rand()%100;
+		nums.push_back(num);
+		ss<<num<<" ";
+	}
+	ss<<"\n";
+	string res=ss.str();
+	const char *res2=(const char*)res.c_str();
+	cout<<res2<<endl;
+	//strcpy(res,res2);
+	sprintf(message,res2);
+	
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
